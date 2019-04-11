@@ -4,7 +4,6 @@
 // init project
 const https = require('https');
 const express = require('express');
-// const contentful = require('contentful');
 const contentful = require('contentful-management');
 const chalk = require('chalk');
 const Table = require('cli-table2');
@@ -13,17 +12,15 @@ const moment = require('moment');
 // persisted using async file storage
 // Security note: the database is saved to the file `db.json` on the local filesystem.
 // It's deliberately placed in the `.data` directory which doesn't get copied if someone remixes the project.
-const low = require('lowdb');
-const FileSync = require('lowdb/adapters/FileSync');
-const adapter = new FileSync('.data/db.json');
-const db = low(adapter);
 const app = express();
 
 // contentful configuration
 const SPACE_ID = process.env.SPACE_ID;
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
 const PERSONAL_ACCESS_TOKEN = process.env.PERSONAL_ACCESS_TOKEN;
+const COINMARKETCAP_KEY = 'b606f249-ad00-49f5-8a21-2dcb8fe903ac';
 const contentTypeId = 'coins';
+const staleTimeLimitMinutes = 1;
 
 const client = contentful.createClient({
   accessToken: PERSONAL_ACCESS_TOKEN
@@ -45,12 +42,6 @@ const sendError = function (response, errObj) {
   response.send({result: errorMsg});
 }
 
-// default user list
-db.defaults({ coins: [
-      { "coin":"IOTA", "price":false }
-    ]
-  }).write();
-
 // http://expressjs.com/en/starter/static-files.html
 app.use(express.static('public'));
 
@@ -59,23 +50,57 @@ app.get("/", function (request, response) {
   response.sendFile(__dirname + '/views/index.html');
 });
 
-app.get("/coins", function (request, response) {
-  var dbUsers=[];
-  var coins = db.get(contentTypeId).value() // Find all coins in the collection
-  coins.forEach(function(coin) {
-    dbUsers.push([coin.name,coin.price]); // adds their info to the dbUsers value
+app.get("/latestQuotes", function (request, response) {
+  var optionsget = {
+    host : 'pro-api.coinmarketcap.com', 
+    path : "/v1/cryptocurrency/quotes/latest?id=1720",
+    method : 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-CMC_PRO_API_KEY': COINMARKETCAP_KEY
+    }
+  };
+  var reqGet = https.request(optionsget, function(resp) {
+      let data = '';
+
+      // A chunk of data has been recieved.
+      resp.on('data', (chunk) => {
+        data += chunk;
+      });
+
+      // The whole response has been received. Print out the result.
+      resp.on('end', () => {
+        let jsonData = JSON.parse(data);
+        // let deltaOneHour = jsonData.data['1720'].quote['USD'].percent_change_1h
+        // return response.send(JSON.stringify(parseFloat(deltaOneHour)));
+        return response.send(jsonData);
+      });
   });
-  response.send(dbUsers); // sends dbUsers back to the page
+
+  reqGet.end();
+  reqGet.on('error', function(e) {
+    response.send({ err: e });
+  });
 });
 
-// update an entry in the coin collection with the submitted values
-app.post("/coins", function (request, response) {
-  db.get(contentTypeId)
-    .find({ name: request.query.fName })
-    .assign({ price: request.query.lName })
-    .write()
-  console.log("New coin inserted in the database");
-  response.sendStatus(200);
+app.get("/iotaGains", function (request, response) {
+  https.get(`https://chrome-coin-alert.glitch.me/latestQuotes`, (resp) => {
+    let data = '';
+    
+    // A chunk of data has been recieved.
+    resp.on('data', (chunk) => {
+      data += chunk;
+    });
+
+    // The whole response has been received. Print out the result.
+    resp.on('end', () => {
+        let jsonData = JSON.parse(data);
+        let deltaOneHour = jsonData.data['1720'].quote['USD'].percent_change_1h
+        return response.send(JSON.stringify(parseFloat(deltaOneHour)));
+    });
+  }).on("error", (err) => {
+    response.send({ err: err });
+  });
 });
 
 app.get("/oneFromName", function (request, response) {
@@ -98,10 +123,10 @@ app.get("/oneFromName", function (request, response) {
           // const items = result.items.map(item => item.fields);
           const firstItem = !!result.count ? result.items[0] : result;
           const msTimeDiff = Date.now() - result.fields.timestamp['en-US'];
-          const isStale = msTimeDiff > 60 * 1000;
+          const isStale = msTimeDiff > staleTimeLimitMinutes * 60 * 1000;
           
+          // response.send({ price: '0.15' });
           if (isStale) {
-            // response.send({ price: '111' });
             https.get(`https://api.binance.com/api/v3/avgPrice?symbol=${result.fields.pairSymbol['en-US']}`, (resp) => {
               let data = '';
 
@@ -254,99 +279,6 @@ app.get("/update", function (request, response) {
     .then((entry) => response.send({result: `Entry ${entry.sys.id} updated.`}))
     .catch(console.error);
 });
-
-// removes entries from users and populates it with default users
-app.get("/reset", function (request, response) {
-  // removes all entries from the collection
-  db.get(contentTypeId)
-  .remove()
-  .write()
-  console.log("Database cleared");
-  
-  // default users inserted in the database
-  var coins= [
-      {"name":"IOTA", "price":false}
-  ];
-  
-  coins.forEach(function(coin){
-    db.get(contentTypeId)
-      .push({ name: coin.name, price: coin.price })
-      .write()
-  });
-  console.log("Default users added");
-  response.redirect("/");
-});
-
-// removes all entries from the collection
-app.get("/clear", function (request, response) {
-  // removes all entries from the collection
-  db.get(contentTypeId)
-  .remove()
-  .write()
-  console.log("Database cleared");
-  response.redirect("/");
-});
-
-// const client = contentful.createClient({
-//   // This is the space ID. A space is like a project folder in Contentful terms
-//   space: SPACE_ID,
-//   // This is the access token for this space. Normally you get both ID and the token in the Contentful web app
-//   accessToken: ACCESS_TOKEN
-// })
-
-// app.get("/all", function (request, response) {
-//   client.getEntries({
-//       content_type: "coins"
-//   })
-//   .then((result) => {
-//     const items = result.items.map(item => item.fields);
-//     return response.send({result: items});
-//   })
-//   .catch((error) => {
-//     response.send({result: error.message})
-//   })
-// });
-
-// app.get("/one", function (request, response) {
-//   client.getEntries({
-//     'fields.name': 'IOTA',
-//     'content_type': 'coins'
-//   })
-//   .then((result) => {
-//     const items = result.items.map(item => item.fields);
-//     return response.send({result: items});
-//   })
-//   .catch((error) => {
-//     response.send({result: error.message})
-//   })
-// });
-
-// app.get('/price', (request, response) => {
-//   response.setHeader('Content-Type', 'application/json');
-//   response.header("Access-Control-Allow-Origin", "*");
-//   response.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
-  
-//   https.get('https://api.binance.com/api/v3/avgPrice?symbol=IOTAUSDT', (resp) => {
-//     let data = '';
-
-//     // A chunk of data has been recieved.
-//     resp.on('data', (chunk) => {
-//       data += chunk;
-//     });
-
-//     // The whole response has been received. Print out the result.
-//     resp.on('end', () => {
-//       db.get('coins')
-//         .find({ name: 'IOTA' })
-//         .assign({ price: data.price })
-//         .write();
-//       response.send(data);
-//     });
-
-//   }).on("error", (err) => {
-//     response.send({ err: err });
-//   });
-// });
 
 // listen for requests :)
 var listener = app.listen(process.env.PORT, function () {
